@@ -1,5 +1,5 @@
 version: 0.1.0
-digest: "2026-09-10T00:00:00Z"
+digest: "sha256:0f8af0622bb01db8b3515771ea41a2c4d97f6196303f6457ad49c7442ee884bb"
 name: headlamp_nmstate
 displayName: NMState
 createdAt: "2026-09-09T00:00:00Z"
@@ -71,6 +71,6 @@ install: |
   ```
 annotations:
   headlamp/plugin/archive-url: https://github.com/naval-group/headlamp-nmstate/releases/download/v0.1.0/headlamp-nmstate-0.1.0.tar.gz
-  headlamp/plugin/archive-checksum: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  headlamp/plugin/archive-checksum: sha256:0f8af0622bb01db8b3515771ea41a2c4d97f6196303f6457ad49c7442ee884bb
   headlamp/plugin/version-compat: ">=0.24.0"
   headlamp/plugin/distro-compat: in-cluster,desktop,docker-desktop,web
