@@ -9,7 +9,7 @@ homeURL: https://github.com/naval-group/headlamp-nmstate
 logoURL: https://raw.githubusercontent.com/nmstate/nmstate/base/logo/fullcolor.png
 containsSecurityUpdates: false
 operator: false
-prerelease: true
+prerelease: false
 keywords:
   - headlamp
   - nmstate
