@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.eslintcache
+storybook-static/
+*.log
+AGENTS.md
+.vscode/
+.goutputstream-*

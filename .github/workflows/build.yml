@@ -1,0 +1,256 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Format check
+        run: npx @kinvolk/headlamp-plugin format --check .
+
+      - name: Lint
+        run: npx @kinvolk/headlamp-plugin lint .
+
+      - name: Type check
+        run: npx @kinvolk/headlamp-plugin tsc .
+
+      - name: Test
+        run: npx @kinvolk/headlamp-plugin test .
+
+      - name: Build
+        run: npx @kinvolk/headlamp-plugin build .
+
+      - name: Package
+        run: |
+          mkdir -p nmstate/dist
+          cp dist/main.js nmstate/dist/
+          cp package.json nmstate/
+          npx @kinvolk/headlamp-plugin package nmstate
+          for f in nmstate-*.tar.gz; do mv "$f" "headlamp-${f}"; done
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          artifact-name: sbom-headlamp-nmstate.spdx.json
+          output-file: sbom-headlamp-nmstate.spdx.json
+
+      - name: Compute checksums
+        run: sha256sum headlamp-nmstate-*.tar.gz > checksums.txt
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: headlamp-nmstate
+          path: |
+            dist/
+            headlamp-nmstate-*.tar.gz
+            checksums.txt
+            sbom-headlamp-nmstate.spdx.json
+
+  docker:
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+
+      - uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: .
+          target: busybox
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # File-only OCI image for the Kubernetes image volume source.
+  # https://kubernetes.io/docs/concepts/storage/volumes/#image
+  oci-image:
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}-oci
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+
+      - uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: .
+          target: oci
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: headlamp-nmstate
+
+      # Generate SLSA provenance attestation signed via Sigstore OIDC.
+      # Stored in GitHub's attestation store and exported as .intoto.jsonl release asset.
+      # Verify with: gh attestation verify headlamp-nmstate-*.tar.gz --repo naval-group/headlamp-nmstate
+      - name: Attest build provenance
+        id: attest
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: headlamp-nmstate-*.tar.gz
+
+      # Export the attestation bundle as .intoto.jsonl (required by OpenSSF Scorecard)
+      - name: Export provenance bundle
+        run: |
+          TARBALL=$(ls headlamp-nmstate-*.tar.gz)
+          cp "${{ steps.attest.outputs.bundle-path }}" "${TARBALL}.intoto.jsonl"
+
+      # Sign the tarball with cosign (keyless/Sigstore OIDC).
+      # cosign 3.x defaults to the new Sigstore bundle format, which packs the
+      # signature, Fulcio certificate, and Rekor inclusion proof into a single
+      # self-verifying .sigstore.json (supersedes the old detached .sig/.pem).
+      # Verify with:
+      #   cosign verify-blob --bundle headlamp-nmstate-<ver>.tar.gz.sigstore.json \
+      #     --certificate-identity-regexp '^https://github.com/naval-group/headlamp-nmstate/' \
+      #     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      #     headlamp-nmstate-<ver>.tar.gz
+      # (OpenSSF Scorecard's signed-releases check is satisfied by the SLSA
+      # provenance .intoto.jsonl above.)
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign release artifacts
+        run: |
+          TARBALL=$(ls headlamp-nmstate-*.tar.gz)
+          cosign sign-blob --yes --bundle "${TARBALL}.sigstore.json" "${TARBALL}"
+
+      - uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          files: |
+            headlamp-nmstate-*.tar.gz
+            headlamp-nmstate-*.tar.gz.intoto.jsonl
+            headlamp-nmstate-*.tar.gz.sigstore.json
+            checksums.txt
+            sbom-headlamp-nmstate.spdx.json
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref, '-rc') }}
+
+  # After every release, submit a PR to update the ArtifactHub checksum.
+  # ArtifactHub requires archive-checksum and CI tarballs have non-reproducible timestamps.
+  update-artifacthub:
+    needs: [build, release]
+    # Skip prereleases (e.g. -rc tags): only the final release should point
+    # ArtifactHub at its tarball, so RC tags don't spawn throwaway PRs.
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-rc')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: headlamp-nmstate
+          path: artifacts
+
+      - name: Create PR with updated checksum
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TARBALL=$(ls artifacts/headlamp-nmstate-*.tar.gz)
+          CHECKSUM=$(sha256sum "$TARBALL" | awk '{print $1}')
+          VERSION=$(basename "$TARBALL" | sed 's/headlamp-nmstate-//;s/.tar.gz//')
+          TAG="${GITHUB_REF#refs/tags/}"
+
+          sed -i "s|headlamp/plugin/archive-url:.*|headlamp/plugin/archive-url: https://github.com/naval-group/headlamp-nmstate/releases/download/${TAG}/headlamp-nmstate-${VERSION}.tar.gz|" artifacthub-pkg.yml
+          sed -i "s|headlamp/plugin/archive-checksum:.*|headlamp/plugin/archive-checksum: sha256:${CHECKSUM}|" artifacthub-pkg.yml
+          # Bump digest so ArtifactHub reprocesses this version and picks up the
+          # corrected archive-url/checksum. Without this, AH keeps whatever it
+          # first indexed (it only re-reads a version when its digest changes).
+          sed -i "s|^digest:.*|digest: \"sha256:${CHECKSUM}\"|" artifacthub-pkg.yml
+
+          if git diff --quiet artifacthub-pkg.yml; then
+            echo "No changes needed"
+            exit 0
+          fi
+
+          BRANCH="chore/artifacthub-${TAG}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add artifacthub-pkg.yml
+          git commit -s -m "chore: update artifacthub for ${TAG}"
+          git push origin "$BRANCH" --force
+          gh pr create --title "chore: update artifacthub for ${TAG}" --body "Auto-generated: updates ArtifactHub archive URL and checksum for ${TAG}." --base main --head "$BRANCH" || echo "PR already exists"

@@ -1,0 +1,13 @@
+# ArtifactHub repository metadata.
+#
+# repositoryID is issued by ArtifactHub when the repository is registered at
+# https://artifacthub.io/control-panel/repositories — it identifies this
+# repository and cannot be reused from another. Fill it in after registering;
+# leaving it wrong is worse than leaving it blank, since it claims someone
+# else's repository.
+repositoryID: "35e7673f-4431-4775-90e6-1f584d2e6ade"
+owners:
+  - name: Alexandre Knecht
+    email: knecht.alexandre@gmail.com
+  - name: Aymeric Deliencourt
+    email: aymeric.deliencourt@aydev.fr

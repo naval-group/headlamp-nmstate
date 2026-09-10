@@ -1,0 +1,668 @@
+import { Icon } from '@iconify/react';
+import { Resource } from '@kinvolk/headlamp-plugin/lib/CommonComponents';
+import Editor, { DiffEditor } from '@monaco-editor/react';
+import {
+  Box,
+  Button,
+  Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Divider,
+  FormControlLabel,
+  IconButton,
+  Paper,
+  Switch,
+  Tab,
+  Tabs,
+  TextField,
+  Typography,
+} from '@mui/material';
+import { useTheme } from '@mui/material/styles';
+import * as yaml from 'js-yaml';
+import { useSnackbar } from 'notistack';
+import React, { useCallback, useEffect, useState } from 'react';
+import CRDDocsViewer from './CRDDocsViewer';
+import UnsavedChangesGuard from './UnsavedChangesGuard';
+
+const { SimpleEditor } = Resource;
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type KubeResourceBuilder = Record<string, any>;
+
+interface CreateResourceDialogProps {
+  open: boolean;
+  onClose: () => void;
+  title: string;
+  resourceClass: {
+    apiEndpoint: { put: (r: unknown) => Promise<unknown>; post: (r: unknown) => Promise<unknown> };
+    apiVersion: string;
+    kind: string;
+  };
+  initialResource: KubeResourceBuilder;
+  editMode?: boolean;
+  initialTab?: number;
+  formComponent: (props: {
+    resource: KubeResourceBuilder;
+    onChange: (resource: KubeResourceBuilder) => void;
+    editMode?: boolean;
+    showErrors?: boolean;
+  }) => React.ReactElement;
+  /** Returns true if the resource is valid and can be created */
+  validate?: (resource: KubeResourceBuilder) => boolean;
+  /**
+   * Last chance to clean the resource before it is sent.
+   *
+   * A form may keep placeholder entries around while they are being typed into
+   * — a half-filled list row, say — which should not reach the cluster.
+   */
+  transform?: (resource: KubeResourceBuilder) => KubeResourceBuilder;
+}
+
+export default function CreateResourceDialog({
+  open,
+  onClose,
+  title,
+  resourceClass,
+  initialResource,
+  editMode = false,
+  initialTab = 0,
+  formComponent: FormComponent,
+  validate,
+  transform,
+}: CreateResourceDialogProps) {
+  const { enqueueSnackbar } = useSnackbar();
+  const theme = useTheme();
+  const [activeTab, setActiveTab] = useState(initialTab); // 0 = Form, 1 = Editor, 2 = Documentation, 3 = Upload
+  const [resource, setResource] = useState(initialResource);
+  const [yamlContent, setYamlContent] = useState('');
+  const [yamlError, setYamlError] = useState<string | null>(null);
+  const [uploadUrl, setUploadUrl] = useState('');
+  const [uploadMethod, setUploadMethod] = useState(0); // 0 = File, 1 = URL
+  const [useMinimalEditor, setUseMinimalEditor] = useState(false);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [showDiffOnly, setShowDiffOnly] = useState(false);
+  const [showErrors, setShowErrors] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const isValid = validate ? validate(resource) : true;
+
+  // Sync initialTab when dialog opens
+  useEffect(() => {
+    if (open) {
+      setActiveTab(initialTab);
+    }
+  }, [open, initialTab]);
+
+  // Track previous tab to detect tab switches (not resource changes).
+  // Initialize to 0 (Form tab) so that opening directly on Editor tab triggers sync.
+  const prevTabRef = React.useRef(0);
+
+  // Sync resource to YAML only when switching TO the Editor tab, not on every resource change.
+  // While the Editor tab is active, yamlContent is the source of truth.
+  useEffect(() => {
+    const switchedToEditor = activeTab === 1 && prevTabRef.current !== 1;
+    prevTabRef.current = activeTab;
+
+    if (switchedToEditor) {
+      try {
+        const yamlStr = yaml.dump(resource, { lineWidth: -1, noRefs: true });
+        setYamlContent(yamlStr);
+        setYamlError(null);
+      } catch (error: unknown) {
+        setYamlError(`Failed to generate YAML: ${(error as Error).message}`);
+      }
+    }
+  }, [resource, activeTab]);
+
+  const updateResource = useCallback((r: KubeResourceBuilder) => {
+    setResource(r);
+    setDirty(true);
+  }, []);
+
+  const handleYamlChange = (newYaml: string | undefined) => {
+    if (!newYaml) return;
+    setYamlContent(newYaml);
+    setDirty(true);
+    try {
+      const parsed = yaml.load(newYaml, { schema: yaml.JSON_SCHEMA });
+      setYamlError(null);
+      updateResource(parsed);
+    } catch (error: unknown) {
+      setYamlError(`Invalid YAML: ${(error as Error).message}`);
+    }
+  };
+
+  const handleSave = async () => {
+    try {
+      let resourceToSave = resource;
+
+      if (activeTab === 1) {
+        try {
+          resourceToSave = yaml.load(yamlContent, { schema: yaml.JSON_SCHEMA });
+        } catch (error: unknown) {
+          console.error('Invalid YAML:', error);
+          enqueueSnackbar(`Invalid YAML: ${(error as Error).message}`, { variant: 'error' });
+          return;
+        }
+      }
+
+      if (transform) {
+        resourceToSave = transform(resourceToSave);
+      }
+
+      if (!resourceToSave?.metadata?.name) {
+        enqueueSnackbar('Resource name is required', { variant: 'error' });
+        return;
+      }
+
+      if (editMode) {
+        await resourceClass.apiEndpoint.put(resourceToSave);
+        enqueueSnackbar(
+          `${resourceToSave.kind} "${resourceToSave.metadata.name}" updated successfully`,
+          { variant: 'success' }
+        );
+      } else {
+        await resourceClass.apiEndpoint.post(resourceToSave);
+        enqueueSnackbar(
+          `${resourceToSave.kind} "${resourceToSave.metadata.name}" created successfully`,
+          { variant: 'success' }
+        );
+      }
+
+      setResource(initialResource);
+      setYamlContent('');
+      setActiveTab(0);
+      onClose();
+    } catch (error: unknown) {
+      console.error(`Failed to ${editMode ? 'update' : 'create'} resource:`, error);
+      enqueueSnackbar(`Failed to ${editMode ? 'update' : 'create'} resource.`, {
+        variant: 'error',
+      });
+    }
+  };
+
+  const resetAndClose = () => {
+    setResource(initialResource);
+    setYamlContent('');
+    setYamlError(null);
+    setUploadUrl('');
+    setActiveTab(0);
+    setShowErrors(false);
+    setDirty(false);
+    onClose();
+  };
+
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = e => {
+      try {
+        const content = e.target?.result as string;
+        const parsed = yaml.load(content, { schema: yaml.JSON_SCHEMA });
+        updateResource(parsed);
+        setYamlContent(content);
+        setYamlError(null);
+        setActiveTab(1);
+        enqueueSnackbar(`File "${file.name}" loaded successfully`, { variant: 'success' });
+      } catch (error: unknown) {
+        console.error('Failed to parse file:', error);
+        enqueueSnackbar(`Failed to parse file: ${(error as Error).message}`, { variant: 'error' });
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const handleUrlLoad = async () => {
+    try {
+      const parsed = new URL(uploadUrl);
+      if (!['http:', 'https:'].includes(parsed.protocol)) {
+        enqueueSnackbar('Only http and https URLs are supported', { variant: 'error' });
+        return;
+      }
+    } catch {
+      enqueueSnackbar('Invalid URL', { variant: 'error' });
+      return;
+    }
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
+    try {
+      const response = await fetch(uploadUrl, { signal: controller.signal });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+      // Stream the response with a 50 MB size limit to prevent the browser tab
+      // from crashing on unbounded responses (e.g. infinite streams, huge files).
+      // For larger deployments, consider using Helm charts or kubectl apply.
+      const MAX_SIZE = 50 * 1024 * 1024;
+      const contentLength = response.headers.get('content-length');
+      if (contentLength && parseInt(contentLength, 10) > MAX_SIZE) {
+        throw new Error(
+          'Response too large (exceeds 50 MB). For larger deployments, consider using Helm charts or kubectl apply.'
+        );
+      }
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error('Unable to read response');
+      }
+      const chunks: Uint8Array[] = [];
+      let totalSize = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        totalSize += value.byteLength;
+        if (totalSize > MAX_SIZE) {
+          reader.cancel();
+          throw new Error(
+            'Response too large (exceeds 50 MB). For larger deployments, consider using Helm charts or kubectl apply.'
+          );
+        }
+        chunks.push(value);
+      }
+      const content = new TextDecoder().decode(
+        chunks.reduce((acc, chunk) => {
+          const merged = new Uint8Array(acc.length + chunk.length);
+          merged.set(acc);
+          merged.set(chunk, acc.length);
+          return merged;
+        }, new Uint8Array())
+      );
+      const parsed = yaml.load(content, { schema: yaml.JSON_SCHEMA });
+      updateResource(parsed);
+      setYamlContent(content);
+      setYamlError(null);
+      setActiveTab(1);
+      enqueueSnackbar('Resource loaded from URL successfully', { variant: 'success' });
+    } catch (error: unknown) {
+      console.error('Failed to load from URL:', error);
+      enqueueSnackbar(`Failed to load from URL: ${(error as Error).message}`, { variant: 'error' });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  };
+
+  return (
+    <UnsavedChangesGuard dirty={dirty} onClose={resetAndClose}>
+      {guardedClose => (
+        <Dialog open={open} onClose={guardedClose} maxWidth="lg" fullWidth>
+          <Box
+            sx={{ borderBottom: 1, borderColor: 'divider', display: 'flex', alignItems: 'center' }}
+          >
+            <Typography variant="h6" sx={{ px: 3, py: 2, flexGrow: 1 }}>
+              {title}
+            </Typography>
+            <Tabs
+              value={activeTab}
+              onChange={(_, newValue) => setActiveTab(newValue)}
+              sx={{ mr: 1 }}
+            >
+              <Tab label="Form" icon={<Icon icon="mdi:form-textbox" />} iconPosition="start" />
+              <Tab label="Editor" icon={<Icon icon="mdi:code-braces" />} iconPosition="start" />
+              <Tab
+                label="Documentation"
+                icon={<Icon icon="mdi:book-open-page-variant" />}
+                iconPosition="start"
+              />
+              <Tab label="Upload" icon={<Icon icon="mdi:upload" />} iconPosition="start" />
+            </Tabs>
+            <IconButton onClick={guardedClose} sx={{ mr: 1 }} size="small">
+              <Icon icon="mdi:close" />
+            </IconButton>
+          </Box>
+
+          <DialogContent
+            sx={{
+              p: 0,
+              height: '70vh',
+              overflow: 'hidden',
+              display: 'flex',
+              flexDirection: 'column',
+            }}
+          >
+            {activeTab === 0 ? (
+              // Form Tab
+              <Box sx={{ p: 3, flex: 1, overflow: 'auto' }}>
+                <FormComponent
+                  resource={resource}
+                  onChange={updateResource}
+                  editMode={editMode}
+                  showErrors={showErrors}
+                />
+              </Box>
+            ) : activeTab === 1 ? (
+              // Editor Tab
+              <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+                <Box
+                  sx={{
+                    p: 1.5,
+                    borderBottom: 1,
+                    borderColor: 'divider',
+                    display: 'flex',
+                    justifyContent: 'flex-end',
+                  }}
+                >
+                  <FormControlLabel
+                    control={
+                      <Switch
+                        checked={useMinimalEditor}
+                        onChange={e => setUseMinimalEditor(e.target.checked)}
+                        size="small"
+                      />
+                    }
+                    label="Use minimal editor"
+                  />
+                </Box>
+                {yamlError && (
+                  <Box
+                    sx={{
+                      px: 2,
+                      py: 0.5,
+                      bgcolor: 'action.hover',
+                      borderBottom: 1,
+                      borderColor: 'warning.main',
+                    }}
+                  >
+                    <Typography variant="caption" color="warning.main" noWrap>
+                      {yamlError}
+                    </Typography>
+                  </Box>
+                )}
+                <Box sx={{ flex: 1, minHeight: 0, position: 'relative', p: 2 }}>
+                  {useMinimalEditor ? (
+                    <Box sx={{ height: '100%', overflow: 'auto' }}>
+                      <SimpleEditor
+                        language="yaml"
+                        value={yamlContent}
+                        onChange={handleYamlChange}
+                      />
+                    </Box>
+                  ) : (
+                    <Box sx={{ position: 'absolute', top: 16, left: 16, right: 16, bottom: 16 }}>
+                      <Editor
+                        language="yaml"
+                        theme={theme.palette.mode === 'dark' ? 'vs-dark' : 'light'}
+                        value={yamlContent}
+                        onChange={handleYamlChange}
+                        options={{
+                          lineNumbers: 'on',
+                          minimap: {
+                            enabled: true,
+                            scale: 2,
+                            showSlider: 'always',
+                          },
+                          scrollBeyondLastLine: false,
+                          wordWrap: 'on',
+                          wrappingIndent: 'indent',
+                          fontSize: 14,
+                          tabSize: 2,
+                          automaticLayout: true,
+                          padding: { top: 8, bottom: 8 },
+                        }}
+                      />
+                    </Box>
+                  )}
+                </Box>
+              </Box>
+            ) : activeTab === 2 ? (
+              // Documentation Tab
+              <Box sx={{ flex: 1, overflow: 'auto' }}>
+                <CRDDocsViewer apiVersion={resourceClass.apiVersion} kind={resourceClass.kind} />
+              </Box>
+            ) : (
+              // Upload Tab
+              <Box sx={{ p: 3, display: 'flex', flexDirection: 'column', gap: 3, flex: 1 }}>
+                <Tabs value={uploadMethod} onChange={(_, val) => setUploadMethod(val)}>
+                  <Tab label="Upload File" />
+                  <Tab label="Load from URL" />
+                </Tabs>
+
+                {uploadMethod === 0 ? (
+                  <Box
+                    sx={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'center',
+                      gap: 3,
+                      mt: 4,
+                    }}
+                  >
+                    <Typography variant="h6" color="text.secondary">
+                      Select a YAML or JSON file
+                    </Typography>
+                    <input
+                      type="file"
+                      accept=".yaml,.yml,.json"
+                      style={{ display: 'none' }}
+                      id="file-upload"
+                      onChange={handleFileUpload}
+                    />
+                    <label htmlFor="file-upload">
+                      <Button
+                        variant="contained"
+                        component="span"
+                        size="large"
+                        startIcon={<Icon icon="mdi:upload" />}
+                      >
+                        Select File
+                      </Button>
+                    </label>
+                    <Typography variant="caption" color="text.secondary">
+                      Drag and drop is not supported yet. Click the button to select a file.
+                    </Typography>
+                  </Box>
+                ) : (
+                  <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, mt: 2 }}>
+                    <Typography variant="h6" color="text.secondary">
+                      Load from a remote URL
+                    </Typography>
+                    <TextField
+                      fullWidth
+                      label="Resource URL"
+                      placeholder="https://example.com/resource.yaml"
+                      value={uploadUrl}
+                      onChange={e => setUploadUrl(e.target.value)}
+                      helperText="Enter a URL to a YAML or JSON file"
+                    />
+                    <Button
+                      variant="contained"
+                      onClick={handleUrlLoad}
+                      size="large"
+                      startIcon={<Icon icon="mdi:download" />}
+                      disabled={!uploadUrl}
+                    >
+                      Load from URL
+                    </Button>
+                  </Box>
+                )}
+              </Box>
+            )}
+          </DialogContent>
+
+          <DialogActions sx={{ px: 3, py: 2 }}>
+            <Button onClick={guardedClose}>Cancel</Button>
+            <Box sx={{ flex: 1 }} />
+            {showErrors && !isValid && (
+              <Chip
+                icon={<Icon icon="mdi:alert-circle-outline" />}
+                label="Some required fields are missing"
+                color="warning"
+                size="small"
+                variant="outlined"
+              />
+            )}
+            <Button
+              onClick={() => setReviewOpen(true)}
+              startIcon={<Icon icon="mdi:eye-outline" />}
+              disabled={!!yamlError || !resource?.metadata?.name}
+            >
+              Review
+            </Button>
+            <Button
+              variant="contained"
+              onClick={() => {
+                if (validate && !isValid) {
+                  setShowErrors(true);
+                  // Scroll to the first missing mandatory field
+                  setTimeout(() => {
+                    const firstMissing = document.querySelector('[data-mandatory-empty="true"]');
+                    if (firstMissing) {
+                      firstMissing.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }
+                  }, 50);
+                  return;
+                }
+                handleSave();
+              }}
+              startIcon={<Icon icon="mdi:check" />}
+              disabled={!!yamlError}
+            >
+              {editMode ? 'Save' : 'Create'}
+            </Button>
+          </DialogActions>
+
+          {/* Review Dialog */}
+          <Dialog open={reviewOpen} onClose={() => setReviewOpen(false)} maxWidth="md" fullWidth>
+            <DialogTitle>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                <Icon icon="mdi:eye-outline" />
+                Review {resource?.kind || 'Resource'}
+              </Box>
+            </DialogTitle>
+            <DialogContent>
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                {/* Summary Cards */}
+                <Paper variant="outlined" sx={{ p: 2 }}>
+                  <Typography variant="overline" color="text.secondary">
+                    Resource Information
+                  </Typography>
+                  <Box sx={{ mt: 1, display: 'flex', flexDirection: 'column', gap: 1 }}>
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <Typography variant="body2" fontWeight="bold">
+                        Kind:
+                      </Typography>
+                      <Chip label={resource?.kind || '-'} size="small" color="primary" />
+                    </Box>
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <Typography variant="body2" fontWeight="bold">
+                        API Version:
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        {resource?.apiVersion || '-'}
+                      </Typography>
+                    </Box>
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <Typography variant="body2" fontWeight="bold">
+                        Name:
+                      </Typography>
+                      <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
+                        {resource?.metadata?.name || '-'}
+                      </Typography>
+                    </Box>
+                    {resource?.metadata?.namespace && (
+                      <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <Typography variant="body2" fontWeight="bold">
+                          Namespace:
+                        </Typography>
+                        <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
+                          {resource.metadata.namespace}
+                        </Typography>
+                      </Box>
+                    )}
+                  </Box>
+                </Paper>
+
+                <Divider />
+
+                {/* YAML Preview */}
+                <Box>
+                  <Box display="flex" alignItems="center" justifyContent="space-between">
+                    <Typography variant="overline" color="text.secondary" gutterBottom>
+                      {showDiffOnly ? 'Changes' : 'YAML Configuration'}
+                    </Typography>
+                    {editMode && (
+                      <FormControlLabel
+                        control={
+                          <Switch
+                            size="small"
+                            checked={showDiffOnly}
+                            onChange={(_, checked) => setShowDiffOnly(checked)}
+                          />
+                        }
+                        label="Show diff only"
+                      />
+                    )}
+                  </Box>
+                  <Box
+                    sx={{
+                      border: 1,
+                      borderColor: 'divider',
+                      borderRadius: 1,
+                      overflow: 'hidden',
+                      bgcolor: 'action.hover',
+                    }}
+                  >
+                    {showDiffOnly && editMode ? (
+                      <DiffEditor
+                        height="400px"
+                        language="yaml"
+                        theme={theme.palette.mode === 'dark' ? 'vs-dark' : 'light'}
+                        original={yaml.dump(initialResource, { lineWidth: -1, noRefs: true })}
+                        modified={yaml.dump(resource, { lineWidth: -1, noRefs: true })}
+                        options={{
+                          readOnly: true,
+                          minimap: { enabled: false },
+                          lineNumbers: 'on',
+                          scrollBeyondLastLine: false,
+                          fontSize: 12,
+                          renderSideBySide: false,
+                          hideUnchangedRegions: {
+                            enabled: true,
+                            contextLineCount: 5,
+                            minimumLineCount: 3,
+                            revealLineCount: 10,
+                          },
+                        }}
+                      />
+                    ) : (
+                      <Editor
+                        height="400px"
+                        language="yaml"
+                        theme={theme.palette.mode === 'dark' ? 'vs-dark' : 'light'}
+                        value={yaml.dump(resource, { lineWidth: -1, noRefs: true })}
+                        options={{
+                          readOnly: true,
+                          minimap: { enabled: false },
+                          lineNumbers: 'on',
+                          scrollBeyondLastLine: false,
+                          wordWrap: 'on',
+                          fontSize: 12,
+                          tabSize: 2,
+                        }}
+                      />
+                    )}
+                  </Box>
+                </Box>
+              </Box>
+            </DialogContent>
+            <DialogActions sx={{ px: 3, py: 2 }}>
+              <Button onClick={() => setReviewOpen(false)}>Close</Button>
+              <Button
+                variant="contained"
+                onClick={() => {
+                  setReviewOpen(false);
+                  handleSave();
+                }}
+                startIcon={<Icon icon="mdi:check" />}
+                disabled={!!yamlError}
+              >
+                {editMode ? 'Confirm & Save' : 'Confirm & Create'}
+              </Button>
+            </DialogActions>
+          </Dialog>
+        </Dialog>
+      )}
+    </UnsavedChangesGuard>
+  );
+}

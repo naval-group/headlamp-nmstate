@@ -1,0 +1,76 @@
+version: 0.1.0
+digest: "2026-09-10T00:00:00Z"
+name: headlamp_nmstate
+displayName: NMState
+createdAt: "2026-09-09T00:00:00Z"
+description: A Headlamp plugin for kubernetes-nmstate — declarative node network configuration and live network topology
+license: Apache-2.0
+homeURL: https://github.com/naval-group/headlamp-nmstate
+logoURL: https://raw.githubusercontent.com/nmstate/nmstate/base/logo/fullcolor.png
+containsSecurityUpdates: false
+operator: false
+prerelease: true
+keywords:
+  - headlamp
+  - nmstate
+  - kubernetes
+  - networking
+  - topology
+  - bridge
+  - bond
+  - vlan
+provider:
+  name: Naval Group
+maintainers:
+  - name: Alexandre Knecht
+    email: knecht.alexandre@gmail.com
+  - name: Aymeric Deliencourt
+    email: aymeric.deliencourt@aydev.fr
+screenshots:
+  - title: Overview
+    url: https://raw.githubusercontent.com/naval-group/headlamp-nmstate/main/screenshots/overview.png
+  - title: Network Topology
+    url: https://raw.githubusercontent.com/naval-group/headlamp-nmstate/main/screenshots/topology-map.png
+  - title: Interface List
+    url: https://raw.githubusercontent.com/naval-group/headlamp-nmstate/main/screenshots/topology-list.png
+  - title: Creating a Policy
+    url: https://raw.githubusercontent.com/naval-group/headlamp-nmstate/main/screenshots/policy-wizard.png
+  - title: Bond Options
+    url: https://raw.githubusercontent.com/naval-group/headlamp-nmstate/main/screenshots/bond-options.png
+  - title: When an Apply Fails
+    url: https://raw.githubusercontent.com/naval-group/headlamp-nmstate/main/screenshots/enactment-failure.png
+  - title: Health
+    url: https://raw.githubusercontent.com/naval-group/headlamp-nmstate/main/screenshots/health.png
+links:
+  - name: GitHub
+    url: https://github.com/naval-group/headlamp-nmstate
+  - name: kubernetes-nmstate
+    url: https://github.com/nmstate/kubernetes-nmstate
+install: |
+  ## Desktop Installation
+
+  Download the latest release tarball and extract to your Headlamp plugins directory:
+
+  ```bash
+  tar -xzf headlamp-nmstate-*.tar.gz -C ~/.config/Headlamp/plugins/
+  ```
+
+  ## In-Cluster Installation
+
+  Add as an init container to your Headlamp deployment:
+
+  ```yaml
+  initContainers:
+    - name: headlamp-nmstate
+      image: ghcr.io/naval-group/headlamp-nmstate:latest
+      command: ["/bin/sh", "-c"]
+      args: ["cp -r /plugins/nmstate /headlamp-plugins/"]
+      volumeMounts:
+        - name: headlamp-plugins
+          mountPath: /headlamp-plugins
+  ```
+annotations:
+  headlamp/plugin/archive-url: https://github.com/naval-group/headlamp-nmstate/releases/download/v0.1.0/headlamp-nmstate-0.1.0.tar.gz
+  headlamp/plugin/archive-checksum: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  headlamp/plugin/version-compat: ">=0.24.0"
+  headlamp/plugin/distro-compat: in-cluster,desktop,docker-desktop,web
